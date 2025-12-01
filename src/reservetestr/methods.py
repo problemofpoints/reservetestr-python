@@ -112,7 +112,7 @@ def testr_bootstrap_odp(
     if triangle is None:
         return None
 
-    bootstrap = cl.bootstrap.BootstrapODPSample(
+    bootstrap = cl.BootstrapODPSample(
         n_sims=n_sims,
         hat_adj=hat_adj,
         random_state=random_state,
