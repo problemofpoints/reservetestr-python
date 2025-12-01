@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/reservetestr/__init__.py
+src/reservetestr/backtesting.py
+src/reservetestr/datasets.py
+src/reservetestr/methods.py
+src/reservetestr/plots.py
+src/reservetestr/utils.py
+src/reservetestr.egg-info/PKG-INFO
+src/reservetestr.egg-info/SOURCES.txt
+src/reservetestr.egg-info/dependency_links.txt
+src/reservetestr.egg-info/requires.txt
+src/reservetestr.egg-info/top_level.txt
+src/reservetestr/data/__init__.py
+src/reservetestr/data/clrd_triangles_fortesting_list.csv
+src/reservetestr/data/meyers_exposure.csv
+src/reservetestr/data/meyers_triangles_long.csv

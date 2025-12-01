@@ -1,0 +1,111 @@
+Metadata-Version: 2.4
+Name: reservetestr
+Version: 0.1.0
+Summary: Backtesting utilities for stochastic loss reserving methods using CAS loss reserve database triangles.
+Author: Codex
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: chainladder>=0.8
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: scipy>=1.10
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: seaborn>=0.13
+Provides-Extra: dev
+Requires-Dist: jupyter>=1.0; extra == "dev"
+Requires-Dist: nbformat>=5.9; extra == "dev"
+Requires-Dist: pytest>=7.4; extra == "dev"
+
+# reservetestr-python
+
+Python port of the [`reservetestr`](https://github.com/problemofpoints/reservetestr) R package for testing stochastic loss reserving methods against the CAS Loss Reserve Database (CLRD). The project builds on [`chainladder-python`](https://github.com/casact/chainladder-python) and provides:
+
+- utilities to pull the CLRD triangles distributed with `chainladder` and isolate the Glenn Meyers testing subset;
+- helpers to build train/test triangle pairs (upper-left vs. holdout) with an adjustable valuation year;
+- wrappers around key stochastic reserving methods (`MackChainladder` and `BootstrapODPSample`) that return tidy back-testing metrics; and
+- exhibit functions plus example notebooks that mirror the PP plot and histogram tooling from the original package.
+
+## Installation
+
+```bash
+python -m pip install -e .
+```
+
+The `pyproject.toml` lists the core dependencies (`chainladder`, `numpy`, `pandas`, `scipy`, `matplotlib`, `seaborn`). Install the optional `dev` extras to work with the notebooks:
+
+```bash
+python -m pip install -e .[dev]
+```
+
+## Usage
+
+```python
+import reservetestr as rt
+
+# Build train/test triangles using the Meyers dataset exported from the R package.
+records = rt.build_triangle_records()
+
+# Run a Mack back-test on the Meyers subset for paid losses.
+mack_results = rt.run_single_backtest(
+    records,
+    rt.testr_mack_chainladder,
+    lines_to_include=["comauto", "ppauto", "wkcomp", "othliab"],
+    loss_type="paid",
+    method_label="mack_paid"
+)
+
+# Run the bootstrap ODP sampler with 1,000 simulations.
+bootstrap_results = rt.run_single_backtest(
+    records,
+    rt.testr_bootstrap_odp,
+    loss_type="paid",
+    method_label="bootstrap_paid",
+    n_sims=1000,
+    hat_adj=False,
+    random_state=22
+)
+
+# Create diagnostics similar to the R package exhibits.
+fig = rt.create_pp_plot(mack_results, cv_limits=(0.0, 0.8), by_line=True)
+fig.savefig("mack_pp_plot.png", dpi=200, bbox_inches="tight")
+```
+
+The repository also ships `meyers_triangles_long.csv`, exported directly from the R package. The dev-lag 10 column supplies the observed ultimate losses for each line/group combination, so the implied percentiles produced in Python align with the original reservetestr results.
+
+### Choosing the valuation year
+
+By default, `build_triangle_records()` uses the exact train/test split shipped with the R package (upper-left vs. lower-right triangles from the Meyers papers), so no calendar-year cut is required. If you want to experiment with alternative diagonals using the CLRD sample bundled with `chainladder-python`, pass a different `evaluation_year`:
+
+```python
+records = rt.build_triangle_records(evaluation_year=1992)
+```
+
+Setting `evaluation_year` to something earlier than 1997 ensures a non-empty testing triangle when working directly from the CLRD sample.
+
+### Output schema
+
+`run_single_backtest` returns a pandas `DataFrame` with the following columns (mirroring the R package):
+
+| Column | Description |
+| --- | --- |
+| `line`, `group_id`, `company` | Triangle identifiers |
+| `method` | Label passed to `run_single_backtest` |
+| `actual_ultimate`, `actual_unpaid` | Observed totals derived from the holdout triangle |
+| `mean_ultimate_est`, `mean_unpaid_est` | Model expectations |
+| `stddev_est`, `cv_unpaid_est` | Dispersion metrics |
+| `implied_pctl` | Implied percentile of the actual result under the modeled distribution |
+
+## Notebooks
+
+Two notebooks in `notebooks/` recreate the workflow from the R package:
+
+1. `mack_chainladder_backtest.ipynb` – loads the Meyers subset, runs the Mack method, and plots PP charts/histograms.
+2. `bootstrap_odp_backtest.ipynb` – repeats the workflow for `BootstrapODPSample`, highlighting how the simulated ultimates compare with observed outcomes.
+
+Each notebook keeps execution lightweight (subsetting to a handful of triangles by default) and documents how to adjust the valuation year and simulation settings.
+
+## Next steps
+
+- Flesh out additional reserving methods (Cape Cod, Bornhuetter-Ferguson, etc.)
+- Add pytest-based regression tests for the loaders and method wrappers
+- Expand exhibit helpers (error metrics, multi-method comparisons)
