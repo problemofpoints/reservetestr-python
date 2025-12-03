@@ -86,8 +86,188 @@ Two notebooks in `notebooks/` recreate the workflow from the R package:
 
 Each notebook keeps execution lightweight (subsetting to a handful of triangles by default) and documents how to adjust the valuation year and simulation settings.
 
+## Creating Custom Test Methods
+
+The package provides a **flexible testing framework** so you don't need to write method-specific test functions. The framework handles all the plumbing (triangle extraction, actual ultimate calculation, derived metrics) - you just provide your reserving logic.
+
+### Three Ways to Create Test Methods
+
+#### 1. **Simple Decorator** (Easiest)
+
+For methods that fit a model and return (mean, stddev), use the `@make_test_method` decorator:
+
+```python
+from reservetestr import make_test_method
+import chainladder as cl
+
+@make_test_method(distribution='lognormal')
+def test_my_method(triangle, alpha=1.0, **kwargs):
+    """My custom reserving method."""
+    model = MyReservingModel(alpha=alpha).fit(triangle)
+    mean_ult = float(model.ultimate_.sum().values)
+    stddev = float(model.std_err_.sum().values)
+    return mean_ult, stddev
+
+# Use it directly with run_single_backtest
+results = rt.run_single_backtest(
+    records,
+    test_my_method,
+    method_label="my_method",
+    alpha=1.5
+)
+```
+
+#### 2. **Factory Function** (More Control)
+
+For more complex cases, use `create_test_method()` to separate fitting and extraction:
+
+```python
+from reservetestr import create_test_method
+import chainladder as cl
+
+def fit_my_model(triangle, param1=10, param2='option', **kwargs):
+    """Fit the model to a triangle."""
+    return MyComplexModel(param1=param1, param2=param2).fit(triangle)
+
+def extract_my_estimates(model, triangle):
+    """Extract estimates from the fitted model."""
+    mean_ultimate = model.get_ultimate_mean()
+    stddev = model.get_ultimate_stddev()
+    return mean_ultimate, stddev
+
+# Create the test method
+test_my_complex_method = create_test_method(
+    fit_func=fit_my_model,
+    extract_func=extract_my_estimates,
+    distribution='lognormal'  # or 'normal'
+)
+
+# Use it
+results = rt.run_single_backtest(
+    records,
+    test_my_complex_method,
+    method_label="complex_method",
+    param1=20,
+    param2='advanced'
+)
+```
+
+#### 3. **Bootstrap/Simulation Methods**
+
+For methods that generate samples (bootstrap, MCMC, etc.), use `create_bootstrap_test_method()`:
+
+```python
+from reservetestr import create_bootstrap_test_method
+import chainladder as cl
+import numpy as np
+
+def generate_my_samples(triangle, n_sims=1000, **kwargs):
+    """Generate simulated ultimate values."""
+    # Your simulation logic here
+    samples = []
+    for _ in range(n_sims):
+        simulated_ult = simulate_one_ultimate(triangle, **kwargs)
+        samples.append(simulated_ult)
+    return np.array(samples)
+
+# Create the test method
+test_my_bootstrap = create_bootstrap_test_method(
+    sample_func=generate_my_samples
+)
+
+# Use it
+results = rt.run_single_backtest(
+    records,
+    test_my_bootstrap,
+    method_label="my_bootstrap",
+    n_sims=5000
+)
+```
+
+### Required Output Structure
+
+All test methods must return a dictionary with these keys:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `actual_ultimate` | float | Observed ultimate loss from test triangle or actual_ultimates |
+| `actual_unpaid` | float | actual_ultimate - latest_observed |
+| `mean_ultimate_est` | float | Model's estimated ultimate loss |
+| `mean_unpaid_est` | float | mean_ultimate_est - latest_observed |
+| `stddev_est` | float | Standard deviation of ultimate estimate |
+| `cv_unpaid_est` | float | Coefficient of variation of unpaid estimate |
+| `implied_pctl` | float | Implied percentile of actual under model distribution |
+
+**The framework handles all of this automatically** - you just provide your model's mean and standard deviation!
+
+### Input Structure
+
+Your test method will receive:
+
+- `train_triangles`: Dictionary mapping loss types ('paid', 'incurred') to Triangle objects
+- `test_triangles`: Dictionary mapping loss types to holdout Triangle objects
+- `loss_type`: String indicating which triangle to use (default: 'paid')
+- `actual_ultimates`: Optional dict of known ultimate values by loss type
+- `**kwargs`: Any additional parameters your method needs
+
+The framework provides helper functions:
+- `get_triangle(triangles, loss_type)` - Extract the right triangle
+- `resolve_actual_ultimate(...)` - Get the actual ultimate value
+- `calculate_derived_metrics(...)` - Compute all derived metrics
+
+### Complete Example: BornhuetterFerguson Method
+
+```python
+from reservetestr import create_test_method
+import chainladder as cl
+import numpy as np
+
+def fit_bf_model(triangle, apriori=1.0, **kwargs):
+    """Fit Bornhuetter-Ferguson model."""
+    return cl.BornhuetterFerguson(apriori=apriori).fit(triangle)
+
+def extract_bf_estimates(model, triangle):
+    """Extract BF estimates (without analytical stddev, use bootstrap)."""
+    mean_ult = float(model.ultimate_.sum().values)
+    # BF doesn't have analytical stddev, so use a simple approximation
+    # or return NaN and use bootstrap separately
+    stddev = float('nan')  # Or implement bootstrap variance
+    return mean_ult, stddev
+
+test_bf = create_test_method(
+    fit_func=fit_bf_model,
+    extract_func=extract_bf_estimates,
+    distribution='lognormal'
+)
+
+# Run it
+results = rt.run_single_backtest(
+    records,
+    test_bf,
+    method_label="bornhuetter_ferguson",
+    apriori=0.8
+)
+```
+
+### Advanced: Custom Percentile Calculation
+
+If your method has a custom distribution, provide a `percentile_func`:
+
+```python
+def my_percentile_func(actual, model, triangle):
+    """Custom percentile calculation using the model's distribution."""
+    # Your custom logic here
+    return model.compute_percentile(actual)
+
+test_custom = create_test_method(
+    fit_func=fit_my_model,
+    extract_func=extract_estimates,
+    percentile_func=my_percentile_func
+)
+```
+
 ## Next steps
 
-- Flesh out additional reserving methods (Cape Cod, Bornhuetter-Ferguson, etc.)
 - Add pytest-based regression tests for the loaders and method wrappers
 - Expand exhibit helpers (error metrics, multi-method comparisons)
+- Create examples for additional methods (Cape Cod, Bornhuetter-Ferguson, etc.)
