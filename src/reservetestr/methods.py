@@ -1,117 +1,62 @@
-"""Wrappers around chainladder reserving methods."""
+"""Wrappers around chainladder reserving methods.
+
+This module demonstrates how to use the flexible testing framework to create
+test methods for different reserving approaches. The examples show both:
+1. Using create_test_method() for analytical methods
+2. Using create_bootstrap_test_method() for simulation-based methods
+3. Direct implementation for full control
+
+All of these approaches work with run_single_backtest().
+"""
 from __future__ import annotations
 
 from typing import Dict, Optional
 
 import chainladder as cl
 import numpy as np
-from scipy.stats import lognorm
 
-from .utils import (
-    latest_cumulative_sum,
-    moments_to_lognormal,
-    safe_divide,
-    triangle_total,
-)
+from .framework import create_bootstrap_test_method, create_test_method
+from .utils import triangle_total
 
 LossTypeMapping = Dict[str, Optional[cl.Triangle]]
 
 
-def _resolve_actual_ultimate(
-    actual_ultimates: Optional[Dict[str, float]], loss_type: str
-) -> Optional[float]:
-    if not actual_ultimates:
-        return None
-    value = actual_ultimates.get(loss_type)
-    if value is None or np.isnan(value):
-        return None
-    return float(value)
+# ==============================================================================
+# Example 1: Mack Chain Ladder using create_test_method()
+# ==============================================================================
+
+def _fit_mack_chainladder(triangle: cl.Triangle, model_kwargs: Optional[dict] = None, **kwargs) -> cl.MackChainladder:
+    """Fit a Mack Chain Ladder model to a triangle."""
+    return cl.MackChainladder(**(model_kwargs or {})).fit(triangle)
 
 
-def _get_triangle(triangles: LossTypeMapping, loss_type: str) -> Optional[cl.Triangle]:
-    if loss_type not in triangles:
-        raise ValueError(f"Unknown loss_type '{loss_type}'")
-    return triangles[loss_type]
+def _extract_mack_estimates(model: cl.MackChainladder, triangle: cl.Triangle) -> tuple[float, float]:
+    """Extract ultimate and stddev from a fitted Mack model."""
+    mean_ultimate = triangle_total(model.ultimate_)
+    stddev = float(np.asarray(model.total_mack_std_err_.values).squeeze())
+    return mean_ultimate, stddev
 
 
-def testr_mack_chainladder(
-    train_triangles: LossTypeMapping,
-    test_triangles: LossTypeMapping,
-    loss_type: str = "paid",
-    actual_ultimates: Optional[Dict[str, float]] = None,
-    model_kwargs: Optional[dict] = None,
-) -> Optional[dict]:
-    """Mirror the reservetestr::testr_MackChainLadder helper."""
-
-    triangle = _get_triangle(train_triangles, loss_type)
-    test_triangle = _get_triangle(test_triangles, loss_type)
-    if triangle is None:
-        return None
-
-    model = cl.MackChainladder(**(model_kwargs or {})).fit(triangle)
-    method_ultimate = triangle_total(model.ultimate_)
-    stddev_df = model.total_mack_std_err_
-    stddev_est = float(np.asarray(stddev_df.values).squeeze())
-
-    latest_observed = latest_cumulative_sum(triangle)
-    actual_ultimate = _resolve_actual_ultimate(actual_ultimates, loss_type)
-    if actual_ultimate is None:
-        if test_triangle is None:
-            return None
-        actual_ultimate = latest_cumulative_sum(test_triangle)
-    actual_unpaid = actual_ultimate - latest_observed
-    mean_unpaid_est = method_ultimate - latest_observed
-    cv_total = safe_divide(stddev_est, method_ultimate)
-
-    try:
-        params = moments_to_lognormal(method_ultimate, cv_total)
-        implied_pctl = float(
-            lognorm.cdf(
-                actual_ultimate,
-                s=params.sdlog,
-                scale=np.exp(params.meanlog),
-            )
-        )
-    except (ValueError, FloatingPointError):
-        implied_pctl = np.nan
-
-    cv_unpaid_est = safe_divide(stddev_est, mean_unpaid_est)
-
-    return {
-        "actual_ultimate": actual_ultimate,
-        "actual_unpaid": actual_unpaid,
-        "mean_ultimate_est": method_ultimate,
-        "mean_unpaid_est": mean_unpaid_est,
-        "stddev_est": stddev_est,
-        "cv_unpaid_est": cv_unpaid_est,
-        "implied_pctl": implied_pctl,
-    }
+# Create the test method using the framework
+testr_mack_chainladder = create_test_method(
+    fit_func=_fit_mack_chainladder,
+    extract_func=_extract_mack_estimates,
+    distribution="lognormal",
+)
 
 
-def _bootstrap_samples(triangle: cl.Triangle) -> np.ndarray:
-    """Fit Chainladder to each simulated triangle and pull total ultimates."""
-    model = cl.Chainladder().fit(triangle)
-    values = np.asarray(model.ultimate_.values, dtype=float)
-    return np.nansum(values, axis=(1, 2, 3))
+# ==============================================================================
+# Example 2: Bootstrap ODP using create_bootstrap_test_method()
+# ==============================================================================
 
-
-def testr_bootstrap_odp(
-    train_triangles: LossTypeMapping,
-    test_triangles: LossTypeMapping,
-    loss_type: str = "paid",
-    actual_ultimates: Optional[Dict[str, float]] = None,
+def _generate_bootstrap_samples(
+    triangle: cl.Triangle,
     n_sims: int = 1000,
     hat_adj: bool = False,
     random_state: Optional[int] = None,
     **bootstrap_kwargs,
-) -> Optional[dict]:
-    """Mirror the reservetestr::testr_BootChainLadder helper using BootstrapODPSample."""
-
-    triangle = _get_triangle(train_triangles, loss_type)
-    test_triangle = _get_triangle(test_triangles, loss_type)
-    if triangle is None:
-        return None
-
+) -> np.ndarray:
+    """Generate bootstrap samples using BootstrapODPSample."""
     bootstrap = cl.BootstrapODPSample(
         n_sims=n_sims,
         hat_adj=hat_adj,
@@ -119,29 +64,14 @@ def testr_bootstrap_odp(
         **bootstrap_kwargs,
     ).fit(triangle)
     resampled = bootstrap.transform(triangle)
-    samples = _bootstrap_samples(resampled)
-    if samples.size == 0:
-        return None
 
-    mean_ultimate = float(np.nanmean(samples))
-    stddev_est = float(np.nanstd(samples, ddof=1)) if samples.size > 1 else float("nan")
-    latest_observed = latest_cumulative_sum(triangle)
-    actual_ultimate = _resolve_actual_ultimate(actual_ultimates, loss_type)
-    if actual_ultimate is None:
-        if test_triangle is None:
-            return None
-        actual_ultimate = latest_cumulative_sum(test_triangle)
-    actual_unpaid = actual_ultimate - latest_observed
-    mean_unpaid_est = mean_ultimate - latest_observed
-    cv_unpaid_est = safe_divide(stddev_est, mean_unpaid_est)
-    implied_pctl = float(np.nanmean(samples <= actual_ultimate)) if np.isfinite(actual_ultimate) else np.nan
+    # Fit Chainladder to each simulated triangle and extract ultimates
+    model = cl.Chainladder().fit(resampled)
+    values = np.asarray(model.ultimate_.values, dtype=float)
+    return np.nansum(values, axis=(1, 2, 3))
 
-    return {
-        "actual_ultimate": actual_ultimate,
-        "actual_unpaid": actual_unpaid,
-        "mean_ultimate_est": mean_ultimate,
-        "mean_unpaid_est": mean_unpaid_est,
-        "stddev_est": stddev_est,
-        "cv_unpaid_est": cv_unpaid_est,
-        "implied_pctl": implied_pctl,
-    }
+
+# Create the test method using the bootstrap framework
+testr_bootstrap_odp = create_bootstrap_test_method(
+    sample_func=_generate_bootstrap_samples,
+)
